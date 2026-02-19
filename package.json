@@ -1,0 +1,25 @@
+{
+  "name": "nomnom",
+  "version": "1.0.0",
+  "description": "A discord music bot for personal use.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JoshuaRivera209/NomNom.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/JoshuaRivera209/NomNom/issues"
+  },
+  "homepage": "https://github.com/JoshuaRivera209/NomNom#readme",
+  "dependencies": {
+    "discord.js": "^14.25.1",
+    "dotenv": "^17.3.1",
+    "lavalink": "^2.13.0",
+    "node": "^25.6.1"
+  }
+}
