@@ -87,7 +87,7 @@ client.on("messageCreate", async (message) => {
     }
 
     await player.playTrack({
-      track: track.encoded,
+      track: { encoded: track.encoded },
     });
 
     message.reply(`Now playing: ${track.info.title}`);
