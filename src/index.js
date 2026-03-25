@@ -4,23 +4,43 @@ import { Shoukaku, Connectors } from "shoukaku";
 
 dotenv.config();
 
-// Search source order. SoundCloud is listed first because standard Lavalink
-// builds cannot handle YouTube's cipher
-const SEARCH_SOURCES = ["scsearch", "ytmsearch", "ytsearch"];
+// Search source order
+const SEARCH_SOURCES = ["ytsearch", "ytmsearch", "scsearch"];
 
-/** Try each search source until one returns a usable result. */
+/**
+ * Picks the first usable track from a single Lavalink resolve result.
+ * @returns {object|null}
+ */
+function pickTrack(result) {
+  if (result?.loadType === "track") return result.data;
+  if (result?.loadType === "search") return result.data[0] ?? null;
+  if (result?.loadType === "playlist") return result.data.tracks[0] ?? null;
+  return null;
+}
+
+/**
+ * Try each search source in order until one returns a usable result.
+ * @returns {{ track: object, sourceIndex: number } | null}
+ */
 async function resolveTrack(node, query) {
-  for (const source of SEARCH_SOURCES) {
-    const result = await node.rest.resolve(`${source}:${query}`);
-    let track;
-    if (result?.loadType === "track") {
-      track = result.data;
-    } else if (result?.loadType === "search") {
-      track = result.data[0];
-    } else if (result?.loadType === "playlist") {
-      track = result.data.tracks[0];
-    }
-    if (track) return track;
+  for (let i = 0; i < SEARCH_SOURCES.length; i++) {
+    const result = await node.rest.resolve(`${SEARCH_SOURCES[i]}:${query}`);
+    const track = pickTrack(result);
+    if (track) return { track, sourceIndex: i };
+  }
+  return null;
+}
+
+/**
+ * Like resolveTrack but starts searching from the source *after* startIndex.
+ * Used for retrying a failed track with the next untried source.
+ * @returns {{ track: object, sourceIndex: number } | null}
+ */
+async function resolveTrackFrom(node, query, startIndex) {
+  for (let i = startIndex + 1; i < SEARCH_SOURCES.length; i++) {
+    const result = await node.rest.resolve(`${SEARCH_SOURCES[i]}:${query}`);
+    const track = pickTrack(result);
+    if (track) return { track, sourceIndex: i };
   }
   return null;
 }
@@ -99,31 +119,56 @@ async function playNext(guildId) {
 /**
  * Lavalink fires the "end" event with different reasons:
  *   - "finished"  : track played to completion → advance queue
- *   - "loadFailed": Lavalink couldn't stream the track → skip & report
+ *   - "loadFailed": track failed — handled exclusively by the "exception" event
  *   - "replaced"  : a new track was force-started (e.g. !skip) → do nothing
  *   - "stopped"   : stopTrack() called explicitly (e.g. !stop) → do nothing
  *   - "cleanup"   : player destroyed → do nothing
+ *
+ * NOTE: When a track fails, Lavalink fires BOTH "exception" AND "end: loadFailed".
+ * The "exception" handler is async (it does a network retry search) so we dont
+ * act on "loadFailed" here — doing so would delete guild state before the retry
+ * completes, leaving the retry with nothing to work with.
  */
-function attachPlayerListeners(player, guildId) {
+function attachPlayerListeners(player, guildId, node) {
   player.on("end", (data) => {
     const reason = data?.reason ?? "finished";
 
-    if (reason === "finished" || reason === "loadFailed") {
-      if (reason === "loadFailed") {
-        const state = guildStates.get(guildId);
-        const label = state?.currentTrack ? trackLabel(state.currentTrack) : "Unknown track";
-        state?.textChannel?.send(`⚠️ Could not play ${label} — skipping.`);
-      }
+    if (reason === "finished") {
       playNext(guildId);
     }
+    // "loadFailed" is handled by the "exception" event below.
     // "replaced", "stopped", "cleanup" → do nothing, queue is already handled
   });
 
-  player.on("exception", (error) => {
+  player.on("exception", async (error) => {
     const state = guildStates.get(guildId);
-    const label = state?.currentTrack ? trackLabel(state.currentTrack) : "Unknown track";
-    console.error(`[${guildId}] Player exception on "${state?.currentTrack?.info?.title}":`, error);
-    state?.textChannel?.send(`❌ Playback error on ${label}: ${error?.message ?? error}`);
+    const failed = state?.currentTrack;
+    const label = failed ? trackLabel(failed) : "Unknown track";
+    const lastSourceIndex = failed?._sourceIndex ?? -1;
+
+    console.error(`[${guildId}] Player exception on "${failed?.info?.title}":`, error);
+
+    // Attempt retry using the next untried search source
+    if (failed && lastSourceIndex + 1 < SEARCH_SOURCES.length) {
+      const query = `${failed.info.author} ${failed.info.title}`;
+      const retryResult = await resolveTrackFrom(node, query, lastSourceIndex);
+
+      if (retryResult) {
+        const { track: retryTrack, sourceIndex: retrySourceIndex } = retryResult;
+        retryTrack._sourceIndex = retrySourceIndex;
+        // Splice the retry track in as the very next to play
+        state.queue.unshift(retryTrack);
+        state.textChannel?.send(
+          `⚠️ Failed via \`${SEARCH_SOURCES[lastSourceIndex]}\` — retrying with \`${SEARCH_SOURCES[retrySourceIndex]}\`…`
+        );
+        await playNext(guildId);
+        return;
+      }
+    }
+
+    // All sources exhausted — skip this track
+    state?.textChannel?.send(`❌ Playback error on ${label} (no sources left to try) — skipping.`);
+    playNext(guildId);
   });
 
   player.on("stuck", (data) => {
@@ -179,6 +224,14 @@ client.on("messageCreate", async (message) => {
       return message.reply("⏹️ Stopped, cleared the queue, and left the channel.");
     }
 
+    // ── !clear ──────────────────────────────────────────────────────────────
+    if (message.content === "!clear") {
+      const state = guildStates.get(message.guild?.id);
+      if (!state) return message.reply("Nothing is playing right now.");
+      state.queue.length = 0;
+      return message.reply("⏹️ Cleared the queue.");
+    }
+
     // ── !play ──────────────────────────────────────────────────────────────
     if (!message.content.startsWith("!play")) return;
     if (!message.guild || !message.member) return;
@@ -199,11 +252,15 @@ client.on("messageCreate", async (message) => {
     }
 
     // Resolve the track before touching the player
-    const track = await resolveTrack(node, query);
+    const resolved = await resolveTrack(node, query);
 
-    if (!track) {
+    if (!resolved) {
       return message.reply("No results found.");
     }
+
+    // Tag the track with the source index so the retry handler knows where to resume
+    const track = resolved.track;
+    track._sourceIndex = resolved.sourceIndex;
 
     const guildId = message.guild.id;
     let state = guildStates.get(guildId);
@@ -220,7 +277,7 @@ client.on("messageCreate", async (message) => {
       guildStates.set(guildId, state);
 
       // Wire up end / exception / stuck handlers
-      attachPlayerListeners(player, guildId);
+      attachPlayerListeners(player, guildId, node);
 
       // Play immediately
       state.queue.push(track);
