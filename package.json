@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "description": "A discord music bot for personal use.",
   "main": "index.js",
+  "type": "module",
   "scripts": {
+    "build": "node --check src/index.js",
+    "start": "node src/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
@@ -17,9 +20,14 @@
   },
   "homepage": "https://github.com/JoshuaRivera209/NomNom#readme",
   "dependencies": {
+    "@discordjs/voice": "^0.19.0",
+    "@snazzah/davey": "^0.1.9",
     "discord.js": "^14.25.1",
     "dotenv": "^17.3.1",
+    "ffmpeg-static": "^5.3.0",
     "lavalink": "^2.13.0",
-    "node": "^25.6.1"
+    "node": "^25.6.1",
+    "shoukaku": "^4.3.0",
+    "ytdl-core": "^4.11.5"
   }
 }
